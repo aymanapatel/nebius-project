@@ -1,0 +1,23 @@
+python:
+  extensions: [".py"]
+  grammar: "tree_sitter_python"
+  nodes:
+    function: "function_definition"
+    class: "class_definition"
+    import: ["import_statement", "import_from_statement"]
+
+javascript:
+  extensions: [".js", ".jsx", ".mjs", ".cjs"]
+  grammar: "tree_sitter_javascript"
+  nodes:
+    function: ["function_declaration", "method_definition", "arrow_function"]
+    class: "class_declaration"
+    import: ["import_statement", "export_statement"]
+
+go:
+  extensions: [".go"]
+  grammar: "tree_sitter_go"
+  nodes:
+    function: ["function_declaration", "method_declaration"]
+    class: "type_declaration"
+    import: "import_declaration"

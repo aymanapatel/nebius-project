@@ -1,0 +1,2 @@
+"""Repository summarizer package."""
+
