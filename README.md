@@ -2,6 +2,25 @@
 
 A FastAPI service that generates human-readable summaries of GitHub repositories using LLMs. The service extracts code skeletons (functions, classes, imports) from source files and uses them to generate concise project summaries, identify technologies, and describe project structure.
 
+## Running the Project
+
+
+
+
+```bash
+# 1) Create and activate a virtual environment (Python 3.10+)
+python3.11 -m venv .venv
+source .venv/bin/activate
+
+# 2) Install the project
+python -m pip install --upgrade pip
+python -m pip install -e .
+
+# 4) Run the server
+NEBIUS_API_KEY="your-api-key" uvicorn repo_summarizer.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+
 ## Architecture
 
 ### Overview
@@ -165,40 +184,7 @@ export PORT="8000"
 3. Generate an API key from your dashboard
 4. Set as `NEBIUS_API_KEY` environment variable
 
-## Running the Project
 
-### Development Mode
-
-Run the FastAPI server with auto-reload:
-
-```bash
-repo-summarizer
-```
-
-Or directly:
-
-```bash
-python -m repo_summarizer.main
-```
-
-### Production Mode
-
-Use a production ASGI server:
-
-```bash
-uvicorn repo_summarizer.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-### Startup
-
-The server requires `NEBIUS_API_KEY` to be set before startup:
-
-```
-$ NEBIUS_API_KEY="your-api-key" repo-summarizer
-INFO:     Startup with API_PROVIDER=nebius
-INFO:     Started server process [12345]
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
 
 ## API Usage
 
@@ -222,26 +208,6 @@ curl -X POST http://localhost:8000/summarize \
 }
 ```
 
-### `GET /languages`
-
-Returns list of supported programming languages.
-
-**Request**:
-```bash
-curl http://localhost:8000/languages
-```
-
-**Response**:
-```json
-{
-  "languages": [
-    {"name": "go", "extensions": [".go"]},
-    {"name": "javascript", "extensions": [".js", ".jsx", ".mjs", ".cjs"]},
-    {"name": "python", "extensions": [".py"]}
-  ]
-}
-```
-
 ## Project Structure
 
 ```
@@ -262,22 +228,12 @@ repo-summarizer/
 └── README.md                 # This file
 ```
 
-## Configuration Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NEBIUS_API_KEY` | - | **Required**: Nebius Token Factory API key |
-| `NEBIUS_MODEL` | `config default` | LLM model to use |
-| `NEBIUS_API_BASE_URL` | `config default` | Nebius API base URL |
-| `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `8000` | Server port |
-| `LANGUAGE_REGISTRY_PATH` | `languages.yaml` | Path to language config |
 
 ## Design Decisions
 
 ### Why Code Skeletons?
 
-Full source code often exceeds LLM context limits. By extracting only signatures (function names, parameters, class definitions), we:
+Full source code often exceeds LLM context limits. By extracting only signatures using the AST and Tree-sitter (function names, parameters, class definitions), we:
 - Fit more files within the token budget
 - Provide the LLM with structural understanding
 - Reduce noise from implementation details
@@ -291,7 +247,3 @@ Full source code often exceeds LLM context limits. By extracting only signatures
 ### Multi-Language Support
 
 The Tree-sitter based parser supports any language with a grammar module. Adding new languages requires only YAML configuration—no code changes needed.
-
-## License
-
-[Your License Here]

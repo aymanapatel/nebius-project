@@ -43,7 +43,9 @@ class RepositoryIngestor:
             str(destination),
         ]
         try:
-            result = subprocess.run(command, check=False, capture_output=True, text=True)
+            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            raise RepositoryCloneError("git clone timed out after 120 seconds (repository may be too large)") from exc
         except OSError as exc:
             raise RepositoryCloneError(f"Failed to run git: {exc}") from exc
 
@@ -65,11 +67,16 @@ class RepositoryIngestor:
             dirs[:] = [
                 d for d in dirs
                 if d != ".git"
+                and not (root_path / d).is_symlink()
                 and not self._is_ignored(root_path / d, repo_path, is_dir=True)
             ]
 
             for filename in files:
                 file_path = root_path / filename
+                # Skip symlinks to avoid loops and out-of-tree reads.
+                if file_path.is_symlink():
+                    logger.debug("Skipping symlink file_path=%s", file_path)
+                    continue
                 if self._should_ignore(file_path, repo_path):
                     continue
                 discovered.append(file_path)

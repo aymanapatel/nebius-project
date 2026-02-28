@@ -74,11 +74,21 @@ class ContextAssembler:
 
     @staticmethod
     def _read_text(file_path: Path) -> str:
+        # Try common encodings before falling back to lossy UTF-8 decoding.
+        for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+            try:
+                data = file_path.read_text(encoding=encoding)
+                return data[:50000]
+            except UnicodeDecodeError:
+                continue
+            except OSError:
+                return ""
+        # Final safety net: read raw bytes and decode lossily.
         try:
-            data = file_path.read_text(encoding="utf-8", errors="ignore")
+            raw = file_path.read_bytes()
+            return raw[:50000].decode("utf-8", errors="replace")
         except OSError:
             return ""
-        return data[:50000]
 
     def _count_tokens(self, text: str) -> int:
         return len(self._encoding.encode(text))

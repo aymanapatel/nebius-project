@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +58,7 @@ class ProjectSummaryLLM:
         return self._model
 
     def summarize(self, context: str) -> dict[str, Any]:
+        context = self._sanitize_context(context)
         system_prompt = (
             "You are an expert software architect. Analyze the following code signatures "
             "from a mixed-language repository. Identify the project's purpose, main components, "
@@ -77,20 +81,26 @@ class ProjectSummaryLLM:
         logger.debug("Prepared LLM payload messages=%d", len(messages))
 
         try:
-            response = self._client.chat.completions.create(
+            response = self._call_with_retry(
                 model=self._model,
                 temperature=0.1,
                 response_format={"type": "json_object"},
                 messages=messages,
+                max_tokens=1024,
             )
+        except LLMError:
+            raise
         except Exception:
             # Some OpenAI-compatible providers do not support response_format.
             try:
-                response = self._client.chat.completions.create(
+                response = self._call_with_retry(
                     model=self._model,
                     temperature=0.1,
                     messages=messages,
+                    max_tokens=1024,
                 )
+            except LLMError:
+                raise
             except Exception as exc:
                 raise LLMError(f"Failed to call LLM provider: {exc}") from exc
 
@@ -112,6 +122,59 @@ class ProjectSummaryLLM:
             "technologies": self._normalize_technologies(payload.get("technologies")),
             "structure": str(payload.get("structure", "")).strip(),
         }
+
+    _MAX_RETRIES: int = 3
+    _INITIAL_BACKOFF: float = 1.0
+
+    def _call_with_retry(self, **kwargs: Any) -> Any:
+        """Call the completions API with exponential backoff on 429 rate-limit errors."""
+        backoff = self._INITIAL_BACKOFF
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                is_rate_limit = status == 429 or "rate" in str(exc).lower()
+                if is_rate_limit and attempt < self._MAX_RETRIES:
+                    sleep_time = backoff + random.uniform(0, 0.5)
+                    logger.warning(
+                        "Rate limited by LLM provider, retrying attempt=%d/%d sleep=%.1fs",
+                        attempt,
+                        self._MAX_RETRIES,
+                        sleep_time,
+                    )
+                    time.sleep(sleep_time)
+                    backoff *= 2
+                else:
+                    raise
+        raise LLMError("Exceeded maximum retries due to rate limiting")  # pragma: no cover
+
+    # Patterns that could attempt to override the system prompt.
+    _INJECTION_RE = re.compile(
+        r"ignore (previous|all|above) instructions"
+        r"|you are now"
+        r"|forget everything"
+        r"|disregard"
+        r"|new personality",
+        re.IGNORECASE,
+    )
+
+    def _sanitize_context(self, context: str) -> str:
+        """Redact lines containing prompt-injection patterns."""
+        lines = context.splitlines()
+        sanitized: list[str] = []
+        redacted = 0
+        for line in lines:
+            if self._INJECTION_RE.search(line):
+                sanitized.append("[redacted]")
+                redacted += 1
+            else:
+                sanitized.append(line)
+        if redacted:
+            logger.warning(
+                "Sanitized %d potential prompt-injection line(s) from context", redacted
+            )
+        return "\n".join(sanitized)
 
     @staticmethod
     def _resolve_provider_settings(model: str | None, provider: str | None) -> ProviderSettings:

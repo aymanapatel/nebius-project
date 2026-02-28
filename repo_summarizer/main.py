@@ -32,12 +32,78 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 LANGUAGES_FILE = Path(os.getenv("LANGUAGE_REGISTRY_PATH", ROOT / "languages.yaml"))
 
+# Map file extensions to canonical technology names used for cross-validation.
+_EXT_TO_TECH: dict[str, str] = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".mjs": "JavaScript",
+    ".cjs": "JavaScript",
+    ".jsx": "React",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".go": "Go",
+    ".java": "Java",
+    ".kt": "Kotlin",
+    ".rb": "Ruby",
+    ".rs": "Rust",
+    ".cpp": "C++",
+    ".cc": "C++",
+    ".c": "C",
+    ".cs": "C#",
+    ".php": "PHP",
+    ".swift": "Swift",
+    ".sh": "Shell",
+    ".bash": "Shell",
+    ".sql": "SQL",
+    ".html": "HTML",
+    ".css": "CSS",
+    ".scss": "CSS",
+    ".yaml": "YAML",
+    ".yml": "YAML",
+    ".json": "JSON",
+    ".tf": "Terraform",
+    ".dockerfile": "Docker",
+}
+
 registry = LanguageRegistry(LANGUAGES_FILE)
 parser = UniversalSkeletonParser(registry=registry)
 ingestor = RepositoryIngestor(registry=registry)
 assembler = ContextAssembler(parser=parser, token_budget=7000)
 
 app = FastAPI(title="Repository Summarizer", version="0.1.0")
+
+
+def _cross_validate_technologies(
+    llm_technologies: list[str],
+    included_files: list[str],
+) -> list[str]:
+    """Merge LLM-claimed technologies with those evidenced by file extensions.
+
+    Logs a warning for any LLM technology that cannot be correlated to an
+    observed file extension, and always injects extension-derived technologies
+    that the LLM may have missed.
+    """
+    observed_extensions = {Path(f).suffix.lower() for f in included_files}
+    # Technologies inferred directly from file extensions in the repo.
+    evidence_based: set[str] = {
+        tech for ext, tech in _EXT_TO_TECH.items() if ext in observed_extensions
+    }
+    llm_set = {t.strip() for t in llm_technologies if t.strip()}
+
+    # Warn about any technology the LLM claims with no file-level evidence.
+    for tech in sorted(llm_set):
+        canonical_names = {v.lower() for v in _EXT_TO_TECH.values()}
+        # Only warn if the claimed technology is a "known" one we can validate.
+        if tech.lower() in canonical_names and tech not in evidence_based:
+            logger.warning(
+                "LLM claimed technology '%s' but no matching files were found in the repository",
+                tech,
+            )
+
+    # Return LLM list augmented with any extension-based technologies it missed.
+    merged = list(llm_set | evidence_based)
+    merged.sort()
+    return merged
 
 
 @app.on_event("startup")
@@ -121,6 +187,11 @@ def summarize_repository(payload: SummarizeRequest) -> SummaryResponse:
         if not result["summary"] or not result["structure"]:
             logger.error("LLM returned incomplete payload keys=%s", sorted(result.keys()))
             raise HTTPException(status_code=500, detail="LLM returned an incomplete summary payload")
+
+        # Cross-validate technologies against observed file extensions.
+        result["technologies"] = _cross_validate_technologies(
+            result["technologies"], included_files
+        )
 
         logger.info("Summarize request completed github_url=%s", github_url)
         return SummaryResponse(**result)
