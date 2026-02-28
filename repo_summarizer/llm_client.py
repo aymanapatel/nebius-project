@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
+from dataclasses import dataclass
 from typing import Any
+
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -13,19 +15,42 @@ class LLMError(RuntimeError):
     pass
 
 
-class ProjectSummaryLLM:
-    def __init__(self, model: str = "openai/gpt-4o-mini") -> None:
-        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        if not api_key:
-            raise LLMError("OPENROUTER_API_KEY is not set")
+@dataclass(frozen=True)
+class ProviderSettings:
+    provider: str
+    api_key: str
+    base_url: str
+    model: str
+    site_url: str = ""
+    app_name: str = ""
 
-        self._model = model
-        self._api_key = api_key
-        self._endpoint = os.getenv(
-            "OPENROUTER_API_URL", "https://openrouter.ai/api/v1/chat/completions"
+
+class ProjectSummaryLLM:
+    def __init__(self, model: str | None = None, provider: str | None = None) -> None:
+        settings = self._resolve_provider_settings(model=model, provider=provider)
+        self._provider = settings.provider
+        self._model = settings.model
+        self._base_url = settings.base_url
+
+        headers: dict[str, str] = {}
+        if settings.site_url:
+            headers["HTTP-Referer"] = settings.site_url
+        if settings.app_name:
+            headers["X-Title"] = settings.app_name
+
+        self._client = OpenAI(
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+            default_headers=headers or None,
         )
-        self._site_url = os.getenv("OPENROUTER_SITE_URL", "").strip()
-        self._app_name = os.getenv("OPENROUTER_APP_NAME", "repo-summarizer").strip()
+
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def summarize(self, context: str) -> dict[str, Any]:
         system_prompt = (
@@ -34,74 +59,43 @@ class ProjectSummaryLLM:
             'and how they interact. Return strict JSON with keys: summary, technologies, structure. '
             "The technologies field must be an array of strings."
         )
-
-        logger.info("Context sent to LLM", )
         user_prompt = f"Repository skeletons:\n\n{context}"
-
-        request_payload = {
-            "model": self._model,
-            "temperature": 0.1,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        logger.info(
-            "Calling OpenRouter API model=%s endpoint=%s context_chars=%d and context=%s",
-            self._model,
-            self._endpoint,
-            len(context),
-            context
-        )
-        logger.debug("Prepared LLM payload messages=%d", len(request_payload["messages"]))
-
-        command = [
-            "curl",
-            "-sS",
-            "-X",
-            "POST",
-            self._endpoint,
-            "-H",
-            f"Authorization: Bearer {self._api_key}",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            json.dumps(request_payload),
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ]
-        if self._site_url:
-            command.extend(["-H", f"HTTP-Referer: {self._site_url}"])
-        if self._app_name:
-            command.extend(["-H", f"X-Title: {self._app_name}"])
-        logger.debug(
-            "Executing OpenRouter request headers site_url_set=%s app_name=%s",
-            bool(self._site_url),
-            self._app_name,
+
+        logger.info(
+            "Calling LLM API provider=%s model=%s base_url=%s context_chars=%d",
+            self._provider,
+            self._model,
+            self._base_url,
+            len(context),
         )
+        logger.debug("Prepared LLM payload messages=%d", len(messages))
 
         try:
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
+            response = self._client.chat.completions.create(
+                model=self._model,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                messages=messages,
             )
-        except OSError as exc:
-            raise LLMError(f"Failed to call LLM: {exc}") from exc
+        except Exception:
+            # Some OpenAI-compatible providers do not support response_format.
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    temperature=0.1,
+                    messages=messages,
+                )
+            except Exception as exc:
+                raise LLMError(f"Failed to call LLM provider: {exc}") from exc
 
-        if result.returncode != 0:
-            raise LLMError(f"OpenRouter request failed: {result.stderr.strip() or 'unknown error'}")
-        logger.debug("OpenRouter HTTP call completed output_chars=%d", len(result.stdout))
+        if not response.choices:
+            raise LLMError("LLM returned no choices")
 
-        try:
-            response = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise LLMError("OpenRouter returned non-JSON output") from exc
-
-        if "error" in response:
-            message = response["error"].get("message", "unknown OpenRouter error")
-            raise LLMError(f"OpenRouter error: {message}")
-
-        content = self._extract_content(response)
+        content = self._extract_content(response.choices[0].message.content)
         if not content:
             raise LLMError("LLM returned an empty response")
 
@@ -109,13 +103,83 @@ class ProjectSummaryLLM:
             payload = json.loads(self._strip_code_fences(content))
         except json.JSONDecodeError as exc:
             raise LLMError("LLM returned non-JSON output") from exc
-        logger.debug("Decoded LLM JSON payload keys=%s", sorted(payload.keys()))
 
+        logger.debug("Decoded LLM JSON payload keys=%s", sorted(payload.keys()))
         return {
             "summary": str(payload.get("summary", "")).strip(),
             "technologies": self._normalize_technologies(payload.get("technologies")),
             "structure": str(payload.get("structure", "")).strip(),
         }
+
+    @staticmethod
+    def _resolve_provider_settings(model: str | None, provider: str | None) -> ProviderSettings:
+        selected_provider = (provider or os.getenv("API_PROVIDER", "nebius")).strip().lower()
+
+        if selected_provider == "nebius":
+            api_key = (
+                os.getenv("NEBIUS_API_KEY", "").strip()
+                or os.getenv("LLM_API_KEY", "").strip()
+            )
+            if not api_key:
+                raise LLMError("NEBIUS_API_KEY is not set")
+            raw_base_url = (
+                os.getenv("NEBIUS_API_BASE_URL", "").strip()
+                or "https://api.tokenfactory.eu-west1.nebius.com/v1/"
+            )
+            return ProviderSettings(
+                provider="nebius",
+                api_key=api_key,
+                base_url=ProjectSummaryLLM._normalize_base_url(raw_base_url),
+                model=(
+                    model
+                    or os.getenv("NEBIUS_MODEL", "").strip()
+                    or os.getenv("HELIUM_MODEL", "openai/gpt-4o-mini")
+                ).strip(),
+                site_url=os.getenv("NEBIUS_SITE_URL", "").strip(),
+                app_name=os.getenv("NEBIUS_APP_NAME", "").strip()
+            )
+
+        if selected_provider == "openrouter":
+            api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            if not api_key:
+                raise LLMError("OPENROUTER_API_KEY is not set")
+            raw_base_url = (
+                os.getenv("OPENROUTER_API_BASE_URL", "").strip()
+                or os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/api/v1").strip()
+            )
+            return ProviderSettings(
+                provider="openrouter",
+                api_key=api_key,
+                base_url=ProjectSummaryLLM._normalize_base_url(raw_base_url),
+                model=(model or os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")).strip(),
+                site_url=os.getenv("OPENROUTER_SITE_URL", "").strip(),
+                app_name=os.getenv("OPENROUTER_APP_NAME", "repo-summarizer").strip(),
+            )
+
+        if selected_provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            if not api_key:
+                raise LLMError("OPENAI_API_KEY is not set")
+            raw_base_url = (
+                os.getenv("OPENAI_API_BASE_URL", "").strip()
+                or os.getenv("OPENAI_API_URL", "https://api.openai.com/v1").strip()
+            )
+            return ProviderSettings(
+                provider="openai",
+                api_key=api_key,
+                base_url=ProjectSummaryLLM._normalize_base_url(raw_base_url),
+                model=(model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")).strip(),
+            )
+
+        raise LLMError("Unsupported API_PROVIDER. Supported values: openrouter, openai, nebius")
+
+    @staticmethod
+    def _normalize_base_url(raw_url: str) -> str:
+        url = raw_url.strip().rstrip("/")
+        suffix = "/chat/completions"
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+        return url
 
     @staticmethod
     def _normalize_technologies(raw_value: Any) -> list[str]:
@@ -129,21 +193,17 @@ class ProjectSummaryLLM:
         return [part.strip() for part in value.split(",") if part.strip()]
 
     @staticmethod
-    def _extract_content(response: dict[str, Any]) -> str:
-        choices = response.get("choices", [])
-        if not choices:
-            return ""
-
-        message = choices[0].get("message", {})
-        content = message.get("content", "")
+    def _extract_content(content: Any) -> str:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            text_parts: list[str] = []
+            parts: list[str] = []
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(str(item.get("text", "")))
-            return "".join(text_parts)
+                    parts.append(str(item.get("text", "")))
+                elif hasattr(item, "type") and getattr(item, "type") == "text":
+                    parts.append(str(getattr(item, "text", "")))
+            return "".join(parts)
         return ""
 
     @staticmethod

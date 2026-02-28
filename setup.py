@@ -18,6 +18,7 @@ setup(
         "tree-sitter-python>=0.23.0",
         "tree-sitter-javascript>=0.23.0",
         "tree-sitter-go>=0.23.0",
+        "openai>=1.30.0",
     ],
     extras_require={
         "dev": [

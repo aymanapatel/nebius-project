@@ -17,33 +17,50 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 
-# 3) Set required environment variables
-export OPENROUTER_API_KEY=your_openrouter_api_key
-
-# 4) Optional model override
-export OPENROUTER_MODEL=openai/gpt-4o-mini
-
-# 5) Optional logging level (INFO or DEBUG)
-export LOG_LEVEL=INFO
-
-# 6) Run the server
+# 4) Run the server
 uvicorn repo_summarizer.main:app --reload
-# or: repo-summarizer
+
+# 5) Enter API provider and API Key
+Select API provider [nebius/openrouter/openai] (default: nebius): nebius
+Enter API key for provider=openrouter: <API-KEY>
+
+
 ```
+
+On startup (interactive terminal), the app prompts for:
+
+- API provider: `openrouter`, `openai`, or `nebius`
+- API key for the selected provider
+- Nebius endpoint is hardcoded by default (`https://api.studio.nebius.com/v1`)
+
+To disable prompts (for CI/non-interactive runs):
+
+```bash
+export DISABLE_STARTUP_PROMPT=1
+```
+
+Then set env vars directly:
+
+- `API_PROVIDER=nebius` + `NEBIUS_API_KEY`
+- `API_PROVIDER=openrouter` + `OPENROUTER_API_KEY`
+- `API_PROVIDER=openai` + `OPENAI_API_KEY`
+
+
+Optional Nebius overrides:
+
+- `NEBIUS_API_BASE_URL`
+- `NEBIUS_MODEL`
 
 ## Endpoints
 
 - `POST /summarize`
 - `GET /languages`
 
-
 ## Extensibility Goal
-    
-  - Adding a new language only requires:
 
-  1. Add grammar dependency in pyproject.toml (/Users/aymanpatel/Desktop/llm-projects/pyproject.toml)
-  2. Add language entry in languages.yaml (/Users/aymanpatel/Desktop/llm-projects/languages.yaml)
+Adding a new language only requires:
 
-  - No core parser/API code changes needed.
+1. Add grammar dependency in `pyproject.toml`.
+2. Add language entry in `languages.yaml`.
 
-  1. If you want, I can add a quick pytest smoke test suite for /languages and /summarize (mocking the LLM call).
+No core parser or API endpoint code changes are required.
