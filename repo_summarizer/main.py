@@ -39,59 +39,10 @@ assembler = ContextAssembler(parser=parser, token_budget=7000)
 
 app = FastAPI(title="Repository Summarizer", version="0.1.0")
 
-PROVIDER_KEY_ENV = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "nebius": "NEBIUS_API_KEY",
-}
-
-
-def _prompt_api_provider_and_key() -> None:
-    if os.getenv("DISABLE_STARTUP_PROMPT", "").strip() == "1":
-        logger.info("Startup prompt disabled by DISABLE_STARTUP_PROMPT=1")
-        return
-
-    interactive = sys.stdin.isatty()
-    provider = os.getenv("API_PROVIDER", "nebius").strip().lower() or "nebius"
-
-    if interactive:
-        selected = input(
-            f"Select API provider [nebius/openrouter/openai] (default: {provider}): "
-        ).strip().lower()
-        provider = selected or provider
-
-    while provider not in PROVIDER_KEY_ENV:
-        if not interactive:
-            logger.warning(
-                "Unsupported API_PROVIDER=%s and non-interactive startup; expected one of %s",
-                provider,
-                sorted(PROVIDER_KEY_ENV),
-            )
-            return
-        provider = input("Unsupported provider. Choose [openrouter/openai/nebius]: ").strip().lower()
-
-    os.environ["API_PROVIDER"] = provider
-
-    key_env_var = PROVIDER_KEY_ENV[provider]
-    existing_key = os.getenv(key_env_var, "").strip()
-
-    if interactive:
-        prompt = f"Enter API key for provider={provider}"
-        if existing_key:
-            prompt = f"{prompt} (press Enter to keep current)"
-        key_input = getpass.getpass(f"{prompt}: ").strip()
-        if key_input:
-            os.environ[key_env_var] = key_input
-            logger.info("Captured API key for provider=%s in %s", provider, key_env_var)
-        elif not existing_key:
-            logger.warning("No API key entered for provider=%s", provider)
-    elif not existing_key:
-        logger.warning("Missing required API key env var=%s for provider=%s", key_env_var, provider)
-
 
 @app.on_event("startup")
-async def startup_prompt() -> None:
-    _prompt_api_provider_and_key()
+async def startup_event() -> None:
+    logger.info("Startup with API_PROVIDER=nebius")
 
 
 @app.exception_handler(HTTPException)

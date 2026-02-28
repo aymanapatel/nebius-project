@@ -5,57 +5,9 @@ import os
 import subprocess
 from pathlib import Path
 
+import pathspec
+
 from repo_summarizer.language_registry import LanguageRegistry
-
-
-IGNORED_DIRS = {
-    ".git",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".idea",
-    ".vscode",
-    "node_modules",
-    "venv",
-    ".venv",
-    "target",
-    "build",
-    "dist",
-    ".next",
-}
-
-IGNORED_FILENAMES = {
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "poetry.lock",
-    "Pipfile.lock",
-    "Cargo.lock",
-}
-
-IGNORED_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".ico",
-    ".svg",
-    ".pdf",
-    ".zip",
-    ".tar",
-    ".gz",
-    ".so",
-    ".dll",
-    ".exe",
-    ".bin",
-    ".class",
-    ".jar",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".otf",
-    ".map",
-}
 
 ENTRYPOINT_FILENAMES = {
     "main.py",
@@ -78,6 +30,7 @@ class RepositoryCloneError(RuntimeError):
 class RepositoryIngestor:
     def __init__(self, registry: LanguageRegistry) -> None:
         self._registry = registry
+        self._gitignore_spec: pathspec.PathSpec | None = None
 
     def clone(self, github_url: str, destination: Path) -> Path:
         logger.info("Cloning repository github_url=%s destination=%s", github_url, destination)
@@ -102,15 +55,22 @@ class RepositoryIngestor:
         return destination
 
     def scan_files(self, repo_path: Path) -> list[Path]:
+        self._gitignore_spec = self._load_gitignore(repo_path)
         discovered: list[Path] = []
 
         for root, dirs, files in os.walk(repo_path):
-            dirs[:] = [item for item in dirs if item not in IGNORED_DIRS]
             root_path = Path(root)
+
+            # Prune directories matched by .gitignore (always skip .git itself)
+            dirs[:] = [
+                d for d in dirs
+                if d != ".git"
+                and not self._is_ignored(root_path / d, repo_path, is_dir=True)
+            ]
 
             for filename in files:
                 file_path = root_path / filename
-                if self._should_ignore(file_path):
+                if self._should_ignore(file_path, repo_path):
                     continue
                 discovered.append(file_path)
 
@@ -150,13 +110,33 @@ class RepositoryIngestor:
         score -= len(relative) // 50
         return score
 
-    def _should_ignore(self, file_path: Path) -> bool:
-        lower_name = file_path.name.lower()
-        if lower_name in IGNORED_FILENAMES:
-            return True
-        if file_path.suffix.lower() in IGNORED_EXTENSIONS:
+    def _should_ignore(self, file_path: Path, repo_path: Path) -> bool:
+        if self._is_ignored(file_path, repo_path, is_dir=False):
             return True
         return self._is_likely_binary(file_path)
+
+    def _is_ignored(self, file_path: Path, repo_path: Path, *, is_dir: bool) -> bool:
+        if self._gitignore_spec is None:
+            return False
+        relative = file_path.relative_to(repo_path).as_posix()
+        if is_dir:
+            relative += "/"
+        return self._gitignore_spec.match_file(relative)
+
+    @staticmethod
+    def _load_gitignore(repo_path: Path) -> pathspec.PathSpec | None:
+        gitignore_path = repo_path / ".gitignore"
+        if not gitignore_path.is_file():
+            logger.debug("No .gitignore found at repo_path=%s", repo_path)
+            return None
+        try:
+            patterns = gitignore_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            logger.warning("Failed to read .gitignore at %s", gitignore_path)
+            return None
+        spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns.splitlines())
+        logger.info("Loaded .gitignore with %d patterns", len(spec.patterns))
+        return spec
 
     @staticmethod
     def _is_likely_binary(file_path: Path) -> bool:

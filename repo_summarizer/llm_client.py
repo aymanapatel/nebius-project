@@ -115,47 +115,26 @@ class ProjectSummaryLLM:
 
     @staticmethod
     def _resolve_provider_settings(model: str | None, provider: str | None) -> ProviderSettings:
-        selected_provider = (provider or os.getenv("API_PROVIDER", "nebius")).strip().lower()
-
-        if selected_provider not in DEFAULT_LLM_PROVIDERS:
-            supported = ", ".join(DEFAULT_LLM_PROVIDERS.keys())
-            raise LLMError(f"Unsupported API_PROVIDER. Supported values: {supported}")
-
+        selected_provider = "nebius"
         config = DEFAULT_LLM_PROVIDERS[selected_provider]
 
-        # Resolve API key based on provider
-        if selected_provider == "nebius":
-            api_key = (
-                os.getenv("NEBIUS_API_KEY", "").strip()
-                or os.getenv("LLM_API_KEY", "").strip()
-            )
-            if not api_key:
-                raise LLMError("NEBIUS_API_KEY is not set")
-            model_env = "NEBIUS_MODEL"
-        elif selected_provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-            if not api_key:
-                raise LLMError("OPENROUTER_API_KEY is not set")
-            model_env = "OPENROUTER_MODEL"
-        elif selected_provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY", "").strip()
-            if not api_key:
-                raise LLMError("OPENAI_API_KEY is not set")
-            model_env = "OPENAI_MODEL"
-        else:
-            raise LLMError(f"Unexpected provider: {selected_provider}")
+        # Resolve API key
+        api_key = (
+            os.getenv("NEBIUS_API_KEY", "").strip()
+            or os.getenv("LLM_API_KEY", "").strip()
+        )
+        if not api_key:
+            raise LLMError("NEBIUS_API_KEY is not set")
 
         # Resolve base URL
-        base_url_env = f"{selected_provider.upper()}_API_BASE_URL"
-        alt_base_url_env = f"{selected_provider.upper()}_API_URL"
         raw_base_url = (
-            os.getenv(base_url_env, "").strip()
-            or os.getenv(alt_base_url_env, "").strip()
+            os.getenv("NEBIUS_API_BASE_URL", "").strip()
+            or os.getenv("NEBIUS_API_URL", "").strip()
             or config.default_base_url
         )
 
         # Resolve model from env or use default from config
-        selected_model = (model or os.getenv(model_env, "").strip() or config.default_model).strip()
+        selected_model = (model or os.getenv("NEBIUS_MODEL", "").strip() or config.default_model).strip()
 
         # Resolve optional fields
         site_url = os.getenv(config.site_url_env or "", "").strip() if config.site_url_env else ""
