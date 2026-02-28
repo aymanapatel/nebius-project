@@ -138,7 +138,14 @@ async def general_exception_handler(_, exc: Exception) -> JSONResponse:
 @app.post(
     "/summarize",
     response_model=SummaryResponse,
-    responses={400: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={
+        400: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
 )
 def summarize_repository(payload: SummarizeRequest) -> SummaryResponse:
     github_url = str(payload.github_url)
@@ -152,10 +159,42 @@ def summarize_repository(payload: SummarizeRequest) -> SummaryResponse:
             repo_path = ingestor.clone(github_url=github_url, destination=checkout_path)
         except RepositoryCloneError as exc:
             logger.exception("Repository clone failed github_url=%s", github_url)
-            raise HTTPException(status_code=400, detail=f"Failed to clone repository: {exc}") from exc
+            reason = getattr(exc, "reason", "unknown")
+            if reason == "network":
+                raise HTTPException(
+                    status_code=503,
+                    detail="Network error while cloning repository. Please retry.",
+                ) from exc
+            if reason == "private":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Repository appears to be private or requires authentication.",
+                ) from exc
+            if reason == "not_found_or_private":
+                raise HTTPException(
+                    status_code=404,
+                    detail="Repository not found or is private.",
+                ) from exc
+            if reason == "invalid":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid GitHub repository URL or repository is not accessible.",
+                ) from exc
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to clone repository: {exc}",
+            ) from exc
 
         logger.info("Repository cloned repo_path=%s", repo_path)
         candidate_files = ingestor.scan_files(repo_path)
+        if not candidate_files:
+            logger.warning("Repository appears empty or unreadable github_url=%s", github_url)
+            raise HTTPException(
+                status_code=400,
+                detail="Repository is empty or contains only ignored/binary files",
+            )
+
         prioritized_files = ingestor.prioritize(candidate_files, repo_path=repo_path)
         context, included_files = assembler.build(repo_path=repo_path, prioritized_files=prioritized_files)
         logger.info(

@@ -51,6 +51,10 @@ curl -sS -X POST "http://127.0.0.1:8000/summarize" \
 
 ## Architecture
 
+## System Prompt
+
+The system prompt can be find in [here](repo_summarizer/prompts/system_prompt.txt).
+
 ### Overview
 
 The Repository Summarizer follows a multi-layered architecture designed to handle repositories of any size efficiently while working within LLM context window limitations.
@@ -133,13 +137,12 @@ LLM integration using OpenAI-compatible API format.
 
 - **Provider**: Nebius Token Factory (hardcoded)
 - **Configuration**: Environment variables for API key and model selection
-- **Prompt Strategy**: System prompt optimized for code skeleton analysis
+- **Prompt Strategy**: System prompt loaded from [`repo_summarizer/prompts/system_prompt.txt`](repo_summarizer/prompts/system_prompt.txt)
 
 Prompt:
 
 ```
-You are an expert software architect. Analyze the following code signatures from a mixed-language repository. Identify the project's purpose, main components,
-and how they interact. Return strict JSON with keys: summary, technologies, structure. The technologies field must be an array of strings."
+See [`repo_summarizer/prompts/system_prompt.txt`](repo_summarizer/prompts/system_prompt.txt)
 ```
 
 ### Data Flow
@@ -166,6 +169,8 @@ repo-summarizer/
 │   ├── repository_ingestor.py # Git clone & file prioritization
 │   ├── context_assembler.py  # Token-budgeted context builder
 │   ├── llm_client.py         # LLM provider integration
+│   ├── prompts/
+│   │   └── system_prompt.txt # LLM system prompt loaded at runtime
 │   └── logging_config.py     # Logging configuration
 ├── languages.yaml            # Language definitions
 ├── pyproject.toml            # Project metadata & dependencies

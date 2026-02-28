@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 class RepositoryCloneError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, reason: str = "unknown") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class RepositoryIngestor:
@@ -45,13 +47,17 @@ class RepositoryIngestor:
         try:
             result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired as exc:
-            raise RepositoryCloneError("git clone timed out after 120 seconds (repository may be too large)") from exc
+            raise RepositoryCloneError(
+                "git clone timed out after 120 seconds (repository may be too large)",
+                reason="network",
+            ) from exc
         except OSError as exc:
-            raise RepositoryCloneError(f"Failed to run git: {exc}") from exc
+            raise RepositoryCloneError(f"Failed to run git: {exc}", reason="network") from exc
 
         if result.returncode != 0:
             message = (result.stderr or result.stdout or "git clone failed").strip()
-            raise RepositoryCloneError(message)
+            reason = self._classify_clone_failure(message)
+            raise RepositoryCloneError(message, reason=reason)
         logger.debug("Clone command succeeded destination=%s", destination)
 
         return destination
@@ -152,3 +158,43 @@ class RepositoryIngestor:
         except OSError:
             return True
         return b"\x00" in sample
+
+    @staticmethod
+    def _classify_clone_failure(message: str) -> str:
+        lower = message.lower()
+
+        network_markers = (
+            "could not resolve host",
+            "failed to connect",
+            "connection timed out",
+            "operation timed out",
+            "network is unreachable",
+            "connection reset",
+            "tls",
+            "ssl",
+        )
+        if any(marker in lower for marker in network_markers):
+            return "network"
+
+        if "repository not found" in lower or "not found" in lower:
+            return "not_found_or_private"
+
+        private_markers = (
+            "authentication failed",
+            "could not read username",
+            "access denied",
+            "permission denied",
+        )
+        if any(marker in lower for marker in private_markers):
+            return "private"
+
+        invalid_markers = (
+            "not a git repository",
+            "unable to access",
+            "does not appear to be a git repository",
+            "invalid",
+        )
+        if any(marker in lower for marker in invalid_markers):
+            return "invalid"
+
+        return "unknown"

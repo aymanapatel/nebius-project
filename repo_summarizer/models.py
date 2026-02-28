@@ -2,11 +2,34 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
 
 
 class SummarizeRequest(BaseModel):
     github_url: AnyHttpUrl
+
+    @field_validator("github_url")
+    @classmethod
+    def validate_github_repository_url(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        host = (value.host or "").lower()
+        if host not in {"github.com", "www.github.com"}:
+            raise ValueError("github_url must be a GitHub URL on github.com")
+
+        path_parts = [part for part in value.path.split("/") if part]
+        if len(path_parts) != 2:
+            raise ValueError(
+                "github_url must include owner and repository, e.g. https://github.com/owner/repo"
+            )
+
+        repository = path_parts[1]
+        if repository.endswith(".git"):
+            repository = repository[:-4]
+        if not repository:
+            raise ValueError(
+                "github_url repository segment cannot be empty"
+            )
+
+        return value
 
 
 class SummaryResponse(BaseModel):

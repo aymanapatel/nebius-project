@@ -37,3 +37,6 @@ package-dir = { "" = "." }
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["repo_summarizer*"]
+
+[tool.setuptools.package-data]
+repo_summarizer = ["prompts/*.txt"]

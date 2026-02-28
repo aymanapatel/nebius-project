@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import random
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
+from pydantic import BaseModel, Field
+import tiktoken
 
 from repo_summarizer.models import DEFAULT_LLM_PROVIDERS
 
@@ -18,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 class LLMError(RuntimeError):
     pass
+
+
+class _LLMSummaryPayload(BaseModel):
+    summary: str = Field(default="")
+    technologies: list[str] = Field(default_factory=list)
+    structure: str = Field(default="")
 
 
 @dataclass(frozen=True)
@@ -31,11 +39,14 @@ class ProviderSettings:
 
 
 class ProjectSummaryLLM:
+    _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "system_prompt.txt"
+
     def __init__(self, model: str | None = None, provider: str | None = None) -> None:
         settings = self._resolve_provider_settings(model=model, provider=provider)
         self._provider = settings.provider
         self._model = settings.model
         self._base_url = settings.base_url
+        self._system_prompt = self._load_system_prompt()
 
         headers: dict[str, str] = {}
         if settings.site_url:
@@ -59,17 +70,15 @@ class ProjectSummaryLLM:
 
     def summarize(self, context: str) -> dict[str, Any]:
         context = self._sanitize_context(context)
-        system_prompt = (
-            "You are an expert software architect. Analyze the following code signatures "
-            "from a mixed-language repository. Identify the project's purpose, main components, "
-            'and how they interact. Return strict JSON with keys: summary, technologies, structure. '
-            "The technologies field must be an array of strings."
-        )
         user_prompt = f"Repository skeletons:\n\n{context}"
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        estimated_prompt_tokens = self._estimate_prompt_tokens(
+            model=self._model,
+            messages=messages,
+        )
 
         logger.info(
             "Calling LLM API provider=%s model=%s base_url=%s context_chars=%d",
@@ -78,60 +87,56 @@ class ProjectSummaryLLM:
             self._base_url,
             len(context),
         )
+
+        logger.info(
+            "Prompt size = %d",
+            estimated_prompt_tokens,
+        )
         logger.debug("Prepared LLM payload messages=%d", len(messages))
 
         try:
             response = self._call_with_retry(
                 model=self._model,
                 temperature=0.1,
-                response_format={"type": "json_object"},
+                response_format=_LLMSummaryPayload,
                 messages=messages,
                 max_tokens=1024,
             )
-        except LLMError:
-            raise
-        except Exception:
-            # Some OpenAI-compatible providers do not support response_format.
-            try:
-                response = self._call_with_retry(
-                    model=self._model,
-                    temperature=0.1,
-                    messages=messages,
-                    max_tokens=1024,
-                )
-            except LLMError:
-                raise
-            except Exception as exc:
-                raise LLMError(f"Failed to call LLM provider: {exc}") from exc
+        except Exception as exc:
+            raise LLMError(f"Failed to call LLM provider with structured output: {exc}") from exc
 
         if not response.choices:
             raise LLMError("LLM returned no choices")
 
-        content = self._extract_content(response.choices[0].message.content)
-        if not content:
-            raise LLMError("LLM returned an empty response")
+        usage = getattr(response, "usage", None)
+        prompt_tokens_reported = getattr(usage, "prompt_tokens", None)
+        if prompt_tokens_reported is not None:
+            logger.info(
+                "LLM prompt tokens reported prompt_tokens=%d",
+                prompt_tokens_reported,
+            )
 
-        try:
-            payload = json.loads(self._strip_code_fences(content))
-        except json.JSONDecodeError as exc:
-            raise LLMError("LLM returned non-JSON output") from exc
+        parsed = getattr(response.choices[0].message, "parsed", None)
+        if not isinstance(parsed, _LLMSummaryPayload):
+            raise LLMError("LLM returned no parsed structured payload")
 
-        logger.debug("Decoded LLM JSON payload keys=%s", sorted(payload.keys()))
+        validated = parsed
+
         return {
-            "summary": str(payload.get("summary", "")).strip(),
-            "technologies": self._normalize_technologies(payload.get("technologies")),
-            "structure": str(payload.get("structure", "")).strip(),
+            "summary": validated.summary.strip(),
+            "technologies": self._normalize_technologies(validated.technologies),
+            "structure": validated.structure.strip(),
         }
 
     _MAX_RETRIES: int = 3
     _INITIAL_BACKOFF: float = 1.0
 
     def _call_with_retry(self, **kwargs: Any) -> Any:
-        """Call the completions API with exponential backoff on 429 rate-limit errors."""
+        """Call the parse API with exponential backoff on 429 rate-limit errors."""
         backoff = self._INITIAL_BACKOFF
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                return self._client.chat.completions.create(**kwargs)
+                return self._client.beta.chat.completions.parse(**kwargs)
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 is_rate_limit = status == 429 or "rate" in str(exc).lower()
@@ -234,24 +239,41 @@ class ProjectSummaryLLM:
         return [part.strip() for part in value.split(",") if part.strip()]
 
     @staticmethod
-    def _extract_content(content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-                elif hasattr(item, "type") and getattr(item, "type") == "text":
-                    parts.append(str(getattr(item, "text", "")))
-            return "".join(parts)
-        return ""
+    def _estimate_prompt_tokens(model: str, messages: list[dict[str, Any]]) -> int:
+        """Best-effort token estimate for chat-style prompt messages."""
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except Exception:
+            encoding = tiktoken.get_encoding("cl100k_base")
 
-    @staticmethod
-    def _strip_code_fences(value: str) -> str:
-        text = value.strip()
-        if text.startswith("```") and text.endswith("```"):
-            lines = text.splitlines()
-            if len(lines) >= 3:
-                return "\n".join(lines[1:-1]).strip()
-        return text
+        # Approximation from OpenAI chat token accounting guidance.
+        tokens_per_message = 4
+        tokens_per_name = -1
+        total = 0
+
+        for message in messages:
+            total += tokens_per_message
+            for key, value in message.items():
+                total += len(encoding.encode(str(value)))
+                if key == "name":
+                    total += tokens_per_name
+
+        # Every reply is primed with assistant role tokens.
+        total += 2
+        return total
+
+    @classmethod
+    def _load_system_prompt(cls) -> str:
+        try:
+            prompt = cls._SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise LLMError(
+                f"Unable to read system prompt file: {cls._SYSTEM_PROMPT_PATH}"
+            ) from exc
+
+        if not prompt:
+            raise LLMError(
+                f"System prompt file is empty: {cls._SYSTEM_PROMPT_PATH}"
+            )
+
+        return prompt
